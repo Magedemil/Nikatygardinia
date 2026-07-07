@@ -559,6 +559,13 @@ const GRADE_MAP = {
 
 const COLORS = ['#e8583a','#34c97b','#7eb8f7','#f5a623','#b87ef7','#f76eb8','#4fc3f7','#81c784','#ffb347','#a8edea'];
 
+// ══════════════ POINTS EXPIRY ══════════════
+const POINTS_EXPIRY_DAYS  = 45;
+const FEATURE_LAUNCH_DATE = '2026-07-07'; // أي نقطة قبل التاريخ ده = legacy
+const LEGACY_GRACE_DATE   = '2026-08-15'; // موعد انتهاء ثابت لكل النقاط القديمة
+const TRANSITION_CAP_DATE = '2026-09-21'; // حد أقصى مؤقت للنقاط الجديدة في فترة الإطلاق
+// ⚠️ الثلاثة ثوابت دي مؤقتة لفترة الإطلاق بس — راجع/احذف بعد 21 سبتمبر 2026
+
 // ══════════════ STATE ══════════════
 let students=[], attendance=[], redemptions=[], selectedSid=null;
 
@@ -599,11 +606,85 @@ function initials(n){const p=n.trim().split(' ');return p.length>=2?p[0][0]+p[1]
 function getAtt(sid){return attendance.filter(a=>a.student_id==sid)}
 function getPts(sid){return getAtt(sid).reduce((s,a)=>{const ac=ACTIVITIES.find(x=>x.key===a.activity);return s+(ac?ac.pts:0)},0)}
 function getRedeemed(sid){return (redemptions||[]).filter(r=>String(r.student_id)===String(sid)).reduce((s,r)=>s+(Number(r.points)||0),0)}
-function getNetPts(sid){return Math.max(0, getPts(sid)-getRedeemed(sid))}
 function getBonusAdded(sid){
   return (redemptions||[])
     .filter(r=>String(r.student_id)===String(sid) && Number(r.points)<0)
     .reduce((s,r)=>s+Math.abs(Number(r.points)),0);
+}
+
+// تاريخ انتهاء الدفعة نفسها: قديمة (قبل الإطلاق) = تاريخ ثابت، جديدة = تاريخ الكسب+45 يوم بحد أقصى TRANSITION_CAP_DATE
+function creditExpiryDate(dateStr){
+  if(new Date(dateStr) < new Date(FEATURE_LAUNCH_DATE)) return LEGACY_GRACE_DATE;
+  const standard = new Date(new Date(dateStr).getTime() + POINTS_EXPIRY_DAYS*86400000);
+  const cap = new Date(TRANSITION_CAP_DATE);
+  return (standard < cap ? standard : cap).toISOString().slice(0,10);
+}
+
+// يحسب رصيد الطالب الصالح للاستبدال بمنطق FIFO: أي صرف بيتخصم من أقدم نقاط لسه صالحة أولاً،
+// وأي دفعة نقاط (حضور أو تشجيعية) فاضل منها رصيد ماتصرفش وعدّت تاريخ انتهائها بتضيع.
+function computeFifo(sid){
+  const credits = [
+    ...getAtt(sid).map(a=>{
+      const ac=ACTIVITIES.find(x=>x.key===a.activity);
+      return {date:a.session_date, amount:ac?ac.pts:0};
+    }),
+    ...(redemptions||[]).filter(r=>String(r.student_id)===String(sid) && Number(r.points)<0)
+      .map(r=>({date:r.redeemed_at, amount:Math.abs(Number(r.points))}))
+  ].filter(c=>c.amount>0).sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+  const debits = (redemptions||[]).filter(r=>String(r.student_id)===String(sid) && Number(r.points)>0)
+    .map(r=>({date:r.redeemed_at, amount:Number(r.points)}))
+    .sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+  const batches = credits.map(c=>({date:c.date, expiry:creditExpiryDate(c.date), remaining:c.amount}));
+  const events = [
+    ...credits.map((c,i)=>({type:'credit', date:c.date, ref:batches[i]})),
+    ...debits.map(d=>({type:'debit', date:d.date, amount:d.amount}))
+  ].sort((a,b)=>new Date(a.date)-new Date(b.date));
+
+  let activeBatches = [];
+  for(const e of events){
+    if(e.type==='credit'){ activeBatches.push(e.ref); }
+    else {
+      let left=e.amount;
+      for(const b of activeBatches){
+        if(left<=0) break;
+        const take=Math.min(b.remaining,left);
+        b.remaining-=take; left-=take;
+      }
+    }
+  }
+
+  let active=0, expired=0;
+  const now = Date.now();
+  const survivors = activeBatches.filter(b=>b.remaining>0)
+    .sort((a,b)=>new Date(a.expiry)-new Date(b.expiry));
+  for(const b of survivors){
+    if(now <= new Date(b.expiry).getTime()) active+=b.remaining;
+    else expired+=b.remaining;
+  }
+  return {active, expired, survivors};
+}
+
+function getNetPts(sid){ return computeFifo(sid).active }
+function getExpiredPts(sid){ return computeFifo(sid).expired }
+function getNextExpiryInfo(sid){
+  const {survivors} = computeFifo(sid);
+  const now = Date.now();
+  const upcoming = survivors.filter(b=>now <= new Date(b.expiry).getTime());
+  if(!upcoming.length) return null;
+  const nearestExpiry = upcoming[0].expiry; // survivors مرتبة أصلاً حسب أقرب expiry
+  const amount = upcoming.filter(b=>b.expiry===nearestExpiry).reduce((s,b)=>s+b.remaining,0);
+  return {
+    daysLeft: Math.ceil((new Date(nearestExpiry).getTime()-now)/86400000),
+    amount,
+    expiry: nearestExpiry
+  };
+}
+function expiryColor(daysLeft){
+  const pct = Math.max(0, Math.min(1, daysLeft/POINTS_EXPIRY_DAYS));
+  const hue = Math.round(pct*130);
+  return `hsl(${hue},70%,48%)`;
 }
 // نقاط Top 10: المكتسب من الحضور + النقاط التشجيعية المضافة (من غير خصم المصروف)
 function getTop10Pts(sid){return getPts(sid)+getBonusAdded(sid)}
@@ -1025,6 +1106,8 @@ function renderStudentReport(){
   const grossPts = getPts(s.id);
   const redeemedPts = getRedeemed(s.id);
   const pts    = getNetPts(s.id);
+  const expiredPts  = getExpiredPts(s.id);
+  const nextExpiry  = getNextExpiryInfo(s.id);
   const myRedemptions = (redemptions||[]).filter(r=>String(r.student_id)===String(s.id));
   const totalSpent = myRedemptions.filter(r=>Number(r.points)>0).reduce((sum,r)=>sum+Number(r.points),0);
   const totalAdded = myRedemptions.filter(r=>Number(r.points)<0).reduce((sum,r)=>sum+Math.abs(Number(r.points)),0);
@@ -1056,7 +1139,20 @@ function renderStudentReport(){
 
   const hist = [...histAtt, ...histRedeem].sort((a,b)=>b.date.localeCompare(a.date));
 
+  const expiryPct = nextExpiry ? Math.max(0, Math.min(1, nextExpiry.daysLeft/POINTS_EXPIRY_DAYS)) : 0;
+  const expiryClr = nextExpiry ? expiryColor(nextExpiry.daysLeft) : 'var(--muted)';
+  const expiryBar = `
+    <div class="fu" style="background:rgba(0,0,0,.03);border:1px solid rgba(0,0,0,.06);border-radius:12px;padding:9px 12px;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:.74rem;font-weight:700;color:${expiryClr};margin-bottom:6px">
+        <span>⏳ ${nextExpiry ? `أقرب نقاط هتنتهي خلال ${nextExpiry.daysLeft} يوم (${nextExpiry.amount} ⭐)` : 'مفيش نقاط صالحة حاليًا'}</span>
+      </div>
+      <div style="height:6px;border-radius:4px;background:rgba(0,0,0,.08);overflow:hidden">
+        <div style="height:100%;width:${expiryPct*100}%;background:${expiryClr};border-radius:4px"></div>
+      </div>
+    </div>`;
+
   el.innerHTML=`
+    ${expiryBar}
     <div class="stu-card fu">
       <div class="stu-header">
         <div class="stu-av-big" style="background:${s.color}">${initials(s.name)}</div>
@@ -1087,7 +1183,7 @@ function renderStudentReport(){
           </div>
         </div>
       </div>
-      ${redeemedPts!==0?`
+      ${(redeemedPts!==0||expiredPts>0)?`
       <div style="background:rgba(245,166,35,.06);border:1px solid rgba(245,166,35,.2);border-radius:12px;
         padding:11px 14px;margin-bottom:14px;font-size:.78rem">
         <div style="display:flex;justify-content:space-between;padding:3px 0;color:var(--text)">
@@ -1098,6 +1194,9 @@ function renderStudentReport(){
         </div>`:''}
         ${totalAdded>0?`<div style="display:flex;justify-content:space-between;padding:3px 0;color:var(--green)">
           <span>نقاط تشجيعية إضافية</span><span style="font-weight:800">+${totalAdded} ⭐</span>
+        </div>`:''}
+        ${expiredPts>0?`<div style="display:flex;justify-content:space-between;padding:3px 0;color:var(--red)">
+          <span>نقاط انتهت صلاحيتها</span><span style="font-weight:800">−${expiredPts} ⭐</span>
         </div>`:''}
         <div style="border-top:1px solid rgba(245,166,35,.25);margin:5px 0"></div>
         <div style="display:flex;justify-content:space-between;padding:3px 0;color:var(--accent);font-weight:900">
