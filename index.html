@@ -540,20 +540,7 @@ header{background:linear-gradient(135deg,#1a1f35,#0f1117);border-bottom:1px soli
     <div style="font-family:'Tajawal',sans-serif;font-weight:800;font-size:1.1rem;margin-bottom:4px;display:flex;align-items:center;gap:8px">
       ❓ أسأل
     </div>
-    <div style="font-size:.75rem;color:var(--muted)">اكتب اللي عاوزه أو محتار فيه، وهيوصل لأمين الخدمة</div>
-  </div>
-
-  <div class="search-wrap">
-    <input class="search-input" id="askSearch" type="text"
-      placeholder="اكتب اسمك..." autocomplete="off"
-      oninput="onAskSearch()"/>
-    <div class="search-icon-wrap">🔍</div>
-    <span id="askClearBtn" onclick="clearAskSearch()"
-      style="display:none;position:absolute;left:12px;top:50%;transform:translateY(-50%);
-      cursor:pointer;font-size:13px;color:#6b7499;background:rgba(255,255,255,.1);
-      border-radius:50%;width:20px;height:20px;align-items:center;justify-content:center;
-      font-weight:800;line-height:1;z-index:2">✕</span>
-    <div class="search-dd" id="askDd"></div>
+    <div style="font-size:.75rem;color:var(--muted)">اكتب اللي عاوزه أو محتار فيه، وهيوصل لأمين الخدمة (من غير ما تكتب اسمك)</div>
   </div>
 
   <textarea id="askText" rows="5" placeholder="اكتب سؤالك أو اللي محتاجه هنا..."
@@ -864,66 +851,17 @@ document.addEventListener('click',e=>{
   if(!e.target.closest('.search-wrap')) document.getElementById('studentDd').style.display='none';
 });
 
-// ══════════════ ASK (أسأل) ══════════════
-let askSid = null;
-
-function clearAskSearch(){
-  document.getElementById('askSearch').value = '';
-  document.getElementById('askClearBtn').style.display = 'none';
-  document.getElementById('askDd').style.display = 'none';
-  askSid = null;
-}
-
-function onAskSearch(){
-  const val = document.getElementById('askSearch').value;
-  document.getElementById('askClearBtn').style.display = val ? 'flex' : 'none';
-  const q = val.trim().toLowerCase();
-  const dd = document.getElementById('askDd');
-  askSid = null;
-  if(!q){ dd.style.display='none'; return }
-  const matches = students.filter(s=>s.name.toLowerCase().includes(q));
-  if(!matches.length){ dd.style.display='none'; return }
-  dd.innerHTML = matches.map(s=>`
-    <div class="search-item" onclick="selectAskStudent(${s.id},'${s.name.replace(/'/g,"\\'")}')">
-      <div class="search-item-av" style="background:${s.color}">${initials(s.name)}</div>
-      <div>
-        <div style="font-size:.88rem;font-weight:600">${s.name}</div>
-        <div style="font-size:.7rem;color:var(--muted)">${shortGrade(s.grade)}</div>
-      </div>
-    </div>`).join('');
-  dd.style.display='block';
-}
-
-function selectAskStudent(id,name){
-  document.getElementById('askSearch').value = name;
-  document.getElementById('askDd').style.display = 'none';
-  askSid = id;
-}
-
-document.addEventListener('click',e=>{
-  if(!e.target.closest('.search-wrap')){
-    const dd = document.getElementById('askDd');
-    if(dd) dd.style.display = 'none';
-  }
-});
-
+// ══════════════ ASK (أسأل) — مجهول بالكامل، من غير اسم ══════════════
 async function submitQuestion(){
   const textEl = document.getElementById('askText');
   const text = textEl.value.trim();
-  if(!askSid){ showToast('اختار اسمك الأول 🙏','red'); return; }
   if(!text){ showToast('اكتب سؤالك الأول','red'); return; }
-  const s = students.find(x=>x.id===askSid);
   const btn = document.getElementById('askSubmitBtn');
   const orig = btn.textContent;
   btn.disabled = true;
   btn.textContent = 'جارٍ الإرسال...';
   try{
-    await sbPost('questions', {
-      student_id: askSid,
-      student_name: s ? s.name : null,
-      grade: s ? s.grade : null,
-      question_text: text
-    });
+    await sbPost('questions', { question_text: text });
     textEl.value = '';
     showToast('✅ تم إرسال سؤالك لأمين الخدمة','green');
   }catch(e){
